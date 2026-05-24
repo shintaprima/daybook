@@ -1520,64 +1520,67 @@ function DashboardView({ tasks, settings, onSelectTask }) {
         ) : <TrendChart data={trendData} maxValue={maxTrend} />}
       </div>
 
-      <div className="db-card" style={{ padding: 20, marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-          <div className="db-heading" style={{ fontSize: 16, fontWeight: 500 }}>Time spent by {chartGroup}</div>
-          <div style={{ display: 'flex', gap: 4 }}>
-            <button className={`db-btn ${chartGroup === 'label' ? 'db-btn-primary' : ''}`} onClick={() => setChartGroup('label')} style={{ padding: '5px 10px', fontSize: 12 }}>Label</button>
-            <button className={`db-btn ${chartGroup === 'task' ? 'db-btn-primary' : ''}`} onClick={() => setChartGroup('task')} style={{ padding: '5px 10px', fontSize: 12 }}>Task</button>
+      {/* Two bar charts side-by-side on wide screens, stacked on narrow */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(440px, 1fr))', gap: 16, marginBottom: 16 }}>
+        <div className="db-card" style={{ padding: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 8 }}>
+            <div className="db-heading" style={{ fontSize: 16, fontWeight: 500 }}>Time spent by {chartGroup}</div>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button className={`db-btn ${chartGroup === 'label' ? 'db-btn-primary' : ''}`} onClick={() => setChartGroup('label')} style={{ padding: '5px 10px', fontSize: 12 }}>Label</button>
+              <button className={`db-btn ${chartGroup === 'task' ? 'db-btn-primary' : ''}`} onClick={() => setChartGroup('task')} style={{ padding: '5px 10px', fontSize: 12 }}>Task</button>
+            </div>
           </div>
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
-          Includes time logged on subtasks rolled into parent
-        </div>
-        {barData.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 13 }}>No data</div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {barData.map((d, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div style={{ width: 140, fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
-                <div style={{ flex: 1, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden' }}>
-                  <div style={{ width: `${(d.seconds / maxBar) * 100}%`, height: '100%', background: d.color, transition: 'width 0.4s' }} />
-                </div>
-                <div className="db-mono" style={{ width: 70, textAlign: 'right', fontSize: 12 }}>{formatDuration(d.seconds)}</div>
-              </div>
-            ))}
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
+            Includes time logged on subtasks rolled into parent
           </div>
-        )}
-      </div>
-
-      {/* Milestone progress chart */}
-      <div className="db-card" style={{ padding: 20 }}>
-        <div className="db-heading" style={{ fontSize: 16, fontWeight: 500, marginBottom: 4 }}>Milestone progress</div>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
-          Tasks with subtasks only, sorted by % complete (closest to 100% on top)
-        </div>
-        {milestoneData.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 13 }}>
-            No tasks with subtasks yet
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {milestoneData.map((d, i) => {
-              const statusColor = getStatusColor(settings.statuses.find(s => s.id === d.statusId)?.color, settings.themeMode);
-              return (
+          {barData.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 13 }}>No data</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {barData.map((d, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <div style={{ width: 4, height: 22, background: statusColor, borderRadius: 2 }} />
-                  <div style={{ width: 160, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
-                  <div style={{ flex: 1, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden', position: 'relative' }}>
-                    <div style={{ width: `${d.pct}%`, height: '100%', background: 'var(--accent)', transition: 'width 0.4s' }} />
+                  <div title={d.name} style={{ width: 100, fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
+                  <div style={{ flex: 1, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden', minWidth: 60 }}>
+                    <div style={{ width: `${(d.seconds / maxBar) * 100}%`, height: '100%', background: d.color, transition: 'width 0.4s' }} />
                   </div>
-                  <div style={{ width: 90, textAlign: 'right', fontSize: 12, color: 'var(--text-secondary)' }}>
-                    <span className="db-mono" style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{d.pct}%</span>
-                    <span style={{ marginLeft: 4 }}>· {d.done}/{d.total}</span>
-                  </div>
+                  <div className="db-mono" style={{ width: 60, textAlign: 'right', fontSize: 12 }}>{formatDuration(d.seconds)}</div>
                 </div>
-              );
-            })}
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Milestone progress chart */}
+        <div className="db-card" style={{ padding: 20 }}>
+          <div className="db-heading" style={{ fontSize: 16, fontWeight: 500, marginBottom: 4 }}>Milestone progress</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
+            Tasks with subtasks only, sorted by % complete (closest to 100% on top)
           </div>
-        )}
+          {milestoneData.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 13 }}>
+              No tasks with subtasks yet
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {milestoneData.map((d, i) => {
+                const statusColor = getStatusColor(settings.statuses.find(s => s.id === d.statusId)?.color, settings.themeMode);
+                return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div style={{ width: 4, height: 22, background: statusColor, borderRadius: 2, flexShrink: 0 }} />
+                    <div title={d.name} style={{ width: 100, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
+                    <div style={{ flex: 1, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden', minWidth: 60 }}>
+                      <div style={{ width: `${d.pct}%`, height: '100%', background: 'var(--accent)', transition: 'width 0.4s' }} />
+                    </div>
+                    <div style={{ width: 80, textAlign: 'right', fontSize: 12, color: 'var(--text-secondary)' }}>
+                      <span className="db-mono" style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{d.pct}%</span>
+                      <span style={{ marginLeft: 4, fontSize: 11 }}>· {d.done}/{d.total}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Timesheet section — embedded at bottom of dashboard */}
