@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Play, Square, Plus, X, Calendar, Clock, Tag, Trash2, Archive, ChevronDown, ChevronRight, ChevronLeft, Settings as SettingsIcon, LayoutGrid, BarChart3, Check, ArchiveRestore, Bell, Moon, Sun, Download, Upload, Flag, Maximize2, Minimize2 } from 'lucide-react';
+import { supabase } from '../lib/supabase/client';
 
 // ============================================================================
 // THEME CONFIGURATION
@@ -159,13 +160,62 @@ const saveToStorage = (key, value) => {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { console.error(e); }
 };
 
-// Migrate v1 → v2: add timeEntries to subtasks if missing
+// Used only by Settings → Import JSON right now (that feature still restores
+// into local state only — it doesn't push imported tasks to Supabase yet).
 const migrateTasks = (tasks) => tasks.map(t => ({
   ...t,
   subtasks: (t.subtasks || []).map(s => ({ ...s, timeEntries: s.timeEntries || [] })),
   priority: t.priority || 'normal',
   statusChangedAt: t.statusChangedAt || t.createdAt || new Date().toISOString(),
 }));
+
+// ============================================================================
+// SUPABASE <-> APP SHAPE MAPPING
+// ============================================================================
+// Tasks table only holds scalar task fields right now. subtasks/timeEntries/
+// comments still live in local state only (wired up in a later pass) — they
+// always come back empty from a fresh load and won't survive a refresh yet.
+const rowToTask = (row) => ({
+  id: row.id,
+  title: row.title,
+  description: row.description || '',
+  statusId: row.status,
+  labels: row.labels || [],
+  startDate: row.start_date,
+  endDate: row.end_date,
+  subtasks: [],
+  timeEntries: [],
+  comments: [],
+  createdAt: row.created_at,
+  archived: row.archived,
+  priority: row.priority,
+  statusChangedAt: row.status_changed_at,
+});
+
+// Only forwards fields that actually exist as tasks columns — patches
+// containing subtasks/timeEntries/comments are filtered out before this runs.
+const taskPatchToRow = (patch) => {
+  const row = {};
+  if ('title' in patch) row.title = patch.title;
+  if ('description' in patch) row.description = patch.description;
+  if ('statusId' in patch) row.status = patch.statusId;
+  if ('labels' in patch) row.labels = patch.labels;
+  if ('startDate' in patch) row.start_date = patch.startDate;
+  if ('endDate' in patch) row.end_date = patch.endDate;
+  if ('archived' in patch) row.archived = patch.archived;
+  if ('priority' in patch) row.priority = patch.priority;
+  return row;
+};
+
+// time_entries stores minutes (matches the original CSV export); the app
+// works in seconds internally, so convert on the way in and out.
+const rowToTimeEntry = (row) => ({
+  id: row.id,
+  seconds: Math.round(Number(row.duration_minutes) * 60),
+  startedAt: row.started_at,
+  note: row.note || '',
+  manual: !!row.manual,
+});
 
 // ============================================================================
 // HELPERS
@@ -321,21 +371,95 @@ const renderMarkdown = (text) => {
 
 export default function App() {
   const [settings, setSettings] = useState(() => loadFromStorage(STORAGE_KEYS.settings, DEFAULT_SETTINGS));
-  const [tasks, setTasks] = useState(() => migrateTasks(loadFromStorage(STORAGE_KEYS.tasks, [])));
+  const [tasks, setTasks] = useState([]);
+  const [tasksLoading, setTasksLoading] = useState(true);
   const [activeTimer, setActiveTimer] = useState(() => loadFromStorage(STORAGE_KEYS.activeTimer, null));
   const [view, setView] = useState('board');
   const [selectedTaskId, setSelectedTaskId] = useState(null);
   const [labelFilter, setLabelFilter] = useState([]);
   const [monthFilter, setMonthFilter] = useState('all');
   const [tick, setTick] = useState(0);
+  const [user, setUser] = useState(null);
 
   // Affirmation popup state
   const [affirmation, setAffirmation] = useState(null);
   const lastAffirmRef = useRef(0); // for 5-second debounce
 
+  // Guards against double-inserting a subtask/comment if a second edit fires
+  // before the first insert's real id has swapped in for the temp client id.
+  const pendingSubtaskInsertsRef = useRef(new Set());
+  const pendingCommentInsertsRef = useRef(new Set());
+
   useEffect(() => saveToStorage(STORAGE_KEYS.settings, settings), [settings]);
-  useEffect(() => saveToStorage(STORAGE_KEYS.tasks, tasks), [tasks]);
   useEffect(() => saveToStorage(STORAGE_KEYS.activeTimer, activeTimer), [activeTimer]);
+
+  // Who's logged in — for the profile button in TopNav.
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUser(data.user));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  // Load tasks (top-level + subtasks), time entries, and comments from
+  // Supabase on mount, then reassemble the nested shape the UI expects.
+  // RLS already scopes everything to the logged-in user, so no explicit
+  // user_id filter is needed on any of these queries.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setTasksLoading(true);
+      const [taskRes, entryRes, commentRes] = await Promise.all([
+        supabase.from('tasks').select('*').order('created_at', { ascending: true }),
+        supabase.from('time_entries').select('*').order('started_at', { ascending: false }),
+        supabase.from('task_comments').select('*').order('created_at', { ascending: true }),
+      ]);
+      if (taskRes.error) console.error('Failed to load tasks from Supabase:', taskRes.error);
+      if (entryRes.error) console.error('Failed to load time entries from Supabase:', entryRes.error);
+      if (commentRes.error) console.error('Failed to load comments from Supabase:', commentRes.error);
+
+      if (!cancelled && taskRes.data) {
+        const entriesByTask = {};
+        (entryRes.data || []).forEach((row) => {
+          if (!entriesByTask[row.task_id]) entriesByTask[row.task_id] = [];
+          entriesByTask[row.task_id].push(rowToTimeEntry(row));
+        });
+
+        const commentsByTask = {};
+        (commentRes.data || []).forEach((row) => {
+          if (!commentsByTask[row.task_id]) commentsByTask[row.task_id] = [];
+          commentsByTask[row.task_id].push({ id: row.id, text: row.body, createdAt: row.created_at });
+        });
+
+        const childrenByParent = {};
+        taskRes.data.forEach((row) => {
+          if (row.parent_task_id) {
+            if (!childrenByParent[row.parent_task_id]) childrenByParent[row.parent_task_id] = [];
+            childrenByParent[row.parent_task_id].push({
+              id: row.id,
+              title: row.title,
+              statusId: row.status,
+              timeEntries: entriesByTask[row.id] || [],
+            });
+          }
+        });
+
+        const topLevel = taskRes.data
+          .filter((row) => !row.parent_task_id)
+          .map((row) => ({
+            ...rowToTask(row),
+            timeEntries: entriesByTask[row.id] || [],
+            comments: commentsByTask[row.id] || [],
+            subtasks: childrenByParent[row.id] || [],
+          }));
+
+        setTasks(topLevel);
+      }
+      if (!cancelled) setTasksLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!activeTimer) return;
@@ -390,18 +514,21 @@ export default function App() {
 
   // ========== ACTIONS ==========
 
-  const createTask = (statusId = 'backlog') => {
-    const newTask = {
-      id: uid(), title: 'New Task', description: '', statusId, labels: [],
-      startDate: null, endDate: null, subtasks: [], timeEntries: [], comments: [],
-      createdAt: new Date().toISOString(), archived: false,
-      priority: 'normal', statusChangedAt: new Date().toISOString(),
-    };
+  const createTask = async (statusId = 'backlog') => {
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({ title: 'New Task', status: statusId })
+      .select()
+      .single();
+    if (error) { console.error('Failed to create task:', error); return; }
+    const newTask = rowToTask(data);
     setTasks(prev => [newTask, ...prev]);
     setSelectedTaskId(newTask.id);
   };
 
   const updateTask = (id, patch) => {
+    const prevTask = tasks.find(t => t.id === id); // snapshot before this update, for diffing subtasks/comments
+
     setTasks(prev => prev.map(t => {
       if (t.id !== id) return t;
       const next = { ...t, ...patch };
@@ -420,12 +547,110 @@ export default function App() {
       }
       return next;
     }));
+
+    // Subtasks/comments arrive as a full replacement array (the UI always
+    // sends the whole list). Diff against the last known state so we only
+    // touch the rows that actually changed.
+    if ('subtasks' in patch && prevTask) {
+      syncSubtasks(id, prevTask.subtasks || [], patch.subtasks || []);
+    }
+    if ('comments' in patch && prevTask) {
+      syncComments(id, prevTask.comments || [], patch.comments || []);
+    }
+
+    // timeEntries patches never come from generic onUpdate calls (the timer
+    // and manual-log functions handle their own persistence directly), so
+    // just strip subtasks/timeEntries/comments before writing scalar fields.
+    // eslint-disable-next-line no-unused-vars
+    const { subtasks, timeEntries, comments, ...persistable } = patch;
+    const row = taskPatchToRow(persistable);
+    if (Object.keys(row).length > 0) {
+      supabase.from('tasks').update(row).eq('id', id).then(({ error }) => {
+        if (error) console.error('Failed to update task:', error);
+      });
+    }
+  };
+
+  // Subtasks are just tasks with parent_task_id set. New ones (client-side
+  // temp id) get inserted and their id swapped for the real one; removed
+  // ones get deleted; changed title/status get updated.
+  const syncSubtasks = (parentId, oldSubs, newSubs) => {
+    const oldIds = new Set(oldSubs.map(s => s.id));
+    const newIds = new Set(newSubs.map(s => s.id));
+
+    oldSubs.forEach((s) => {
+      if (!newIds.has(s.id)) {
+        supabase.from('tasks').delete().eq('id', s.id).then(({ error }) => {
+          if (error) console.error('Failed to delete subtask:', error);
+        });
+      }
+    });
+
+    newSubs.forEach((s) => {
+      if (!oldIds.has(s.id)) {
+        if (pendingSubtaskInsertsRef.current.has(s.id)) return;
+        pendingSubtaskInsertsRef.current.add(s.id);
+        supabase.from('tasks')
+          .insert({ title: s.title, status: s.statusId, parent_task_id: parentId })
+          .select().single()
+          .then(({ data, error }) => {
+            pendingSubtaskInsertsRef.current.delete(s.id);
+            if (error) { console.error('Failed to create subtask:', error); return; }
+            setTasks(prev => prev.map(t => t.id === parentId ? {
+              ...t,
+              subtasks: t.subtasks.map(sub => sub.id === s.id ? { ...sub, id: data.id } : sub),
+            } : t));
+          });
+      } else {
+        const old = oldSubs.find(o => o.id === s.id);
+        if (old && (old.title !== s.title || old.statusId !== s.statusId)) {
+          supabase.from('tasks').update({ title: s.title, status: s.statusId }).eq('id', s.id).then(({ error }) => {
+            if (error) console.error('Failed to update subtask:', error);
+          });
+        }
+      }
+    });
+  };
+
+  // Comments are add/delete only in this app (no editing), so the diff is simpler.
+  const syncComments = (taskId, oldComments, newComments) => {
+    const oldIds = new Set(oldComments.map(c => c.id));
+    const newIds = new Set(newComments.map(c => c.id));
+
+    oldComments.forEach((c) => {
+      if (!newIds.has(c.id)) {
+        supabase.from('task_comments').delete().eq('id', c.id).then(({ error }) => {
+          if (error) console.error('Failed to delete comment:', error);
+        });
+      }
+    });
+
+    newComments.forEach((c) => {
+      if (!oldIds.has(c.id)) {
+        if (pendingCommentInsertsRef.current.has(c.id)) return;
+        pendingCommentInsertsRef.current.add(c.id);
+        supabase.from('task_comments')
+          .insert({ task_id: taskId, body: c.text })
+          .select().single()
+          .then(({ data, error }) => {
+            pendingCommentInsertsRef.current.delete(c.id);
+            if (error) { console.error('Failed to add comment:', error); return; }
+            setTasks(prev => prev.map(t => t.id === taskId ? {
+              ...t,
+              comments: t.comments.map(cm => cm.id === c.id ? { id: data.id, text: data.body, createdAt: data.created_at } : cm),
+            } : t));
+          });
+      }
+    });
   };
 
   const deleteTask = (id) => {
     if (activeTimer?.taskId === id) setActiveTimer(null);
     setTasks(prev => prev.filter(t => t.id !== id));
     if (selectedTaskId === id) setSelectedTaskId(null);
+    supabase.from('tasks').delete().eq('id', id).then(({ error }) => {
+      if (error) console.error('Failed to delete task:', error);
+    });
   };
 
   const archiveTask = (id) => { updateTask(id, { archived: true }); setSelectedTaskId(null); };
@@ -435,21 +660,31 @@ export default function App() {
     setActiveTimer({ taskId, subtaskId, mode, duration, startedAt: Date.now() });
   };
 
+  // NOTE: subtasks aren't real Supabase rows yet (that's the next stage), so
+  // subtask time entries stay local-only for now — same limitation as before.
+  // Entries logged directly against a top-level task persist to Supabase.
+
   const stopTimer = () => {
     if (!activeTimer) return;
     const elapsed = Math.floor((Date.now() - activeTimer.startedAt) / 1000);
     const task = tasks.find(t => t.id === activeTimer.taskId);
     if (task && elapsed > 0) {
-      const entry = {
-        id: uid(), seconds: elapsed,
-        startedAt: new Date(activeTimer.startedAt).toISOString(), note: '',
-      };
+      const startedAtIso = new Date(activeTimer.startedAt).toISOString();
       if (activeTimer.subtaskId) {
+        const entry = { id: uid(), seconds: elapsed, startedAt: startedAtIso, note: '' };
         const subs = task.subtasks.map(s =>
           s.id === activeTimer.subtaskId ? { ...s, timeEntries: [...(s.timeEntries || []), entry] } : s);
         updateTask(activeTimer.taskId, { subtasks: subs });
       } else {
-        updateTask(activeTimer.taskId, { timeEntries: [...task.timeEntries, entry] });
+        const taskId = activeTimer.taskId;
+        supabase.from('time_entries')
+          .insert({ task_id: taskId, started_at: startedAtIso, duration_minutes: elapsed / 60 })
+          .select().single()
+          .then(({ data, error }) => {
+            if (error) { console.error('Failed to save time entry:', error); return; }
+            const entry = rowToTimeEntry(data);
+            setTasks(prev => prev.map(t => t.id === taskId ? { ...t, timeEntries: [...t.timeEntries, entry] } : t));
+          });
       }
     }
     setActiveTimer(null);
@@ -458,18 +693,24 @@ export default function App() {
   const logTimeManually = (taskId, subtaskId, minutes, dateIso, note = '') => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
-    const entry = {
-      id: uid(), seconds: minutes * 60,
-      startedAt: dateIso || new Date().toISOString(),
-      note, manual: true,
-    };
+    const startedAt = dateIso || new Date().toISOString();
+
     if (subtaskId) {
+      const entry = { id: uid(), seconds: minutes * 60, startedAt, note, manual: true };
       const subs = task.subtasks.map(s =>
         s.id === subtaskId ? { ...s, timeEntries: [...(s.timeEntries || []), entry] } : s);
       updateTask(taskId, { subtasks: subs });
-    } else {
-      updateTask(taskId, { timeEntries: [...task.timeEntries, entry] });
+      return;
     }
+
+    supabase.from('time_entries')
+      .insert({ task_id: taskId, started_at: startedAt, duration_minutes: minutes, manual: true, note })
+      .select().single()
+      .then(({ data, error }) => {
+        if (error) { console.error('Failed to log time entry:', error); return; }
+        const entry = rowToTimeEntry(data);
+        setTasks(prev => prev.map(t => t.id === taskId ? { ...t, timeEntries: [...t.timeEntries, entry] } : t));
+      });
   };
 
   const deleteTimeEntry = (taskId, subtaskId, entryId) => {
@@ -479,9 +720,13 @@ export default function App() {
       const subs = task.subtasks.map(s =>
         s.id === subtaskId ? { ...s, timeEntries: s.timeEntries.filter(e => e.id !== entryId) } : s);
       updateTask(taskId, { subtasks: subs });
-    } else {
-      updateTask(taskId, { timeEntries: task.timeEntries.filter(e => e.id !== entryId) });
+      return;
     }
+    setTasks(prev => prev.map(t => t.id === taskId
+      ? { ...t, timeEntries: t.timeEntries.filter(e => e.id !== entryId) } : t));
+    supabase.from('time_entries').delete().eq('id', entryId).then(({ error }) => {
+      if (error) console.error('Failed to delete time entry:', error);
+    });
   };
 
   // ========== FILTERS ==========
@@ -607,19 +852,25 @@ export default function App() {
         onSelectTask={setSelectedTaskId}
         themeMode={settings.themeMode}
         onToggleTheme={() => setSettings({ ...settings, themeMode: settings.themeMode === 'light' ? 'dark' : 'light' })}
+        user={user}
+        onSignOut={() => supabase.auth.signOut()}
       />
 
       <OverloadBanner tasks={tasks} thresholds={settings.thresholds} />
 
       <div style={{ padding: '20px 28px', paddingBottom: 60 }}>
         {view === 'board' && (
-          <BoardView
-            tasks={filteredTasks} allTasks={tasks} settings={settings}
-            onSelectTask={setSelectedTaskId} onCreateTask={createTask} onUpdateTask={updateTask}
-            labelFilter={labelFilter} setLabelFilter={setLabelFilter}
-            monthFilter={monthFilter} setMonthFilter={setMonthFilter}
-            activeTimer={activeTimer} onStartTimer={startTimer} onStopTimer={stopTimer}
-          />
+          tasksLoading ? (
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-secondary)' }}>Loading tasks…</div>
+          ) : (
+            <BoardView
+              tasks={filteredTasks} allTasks={tasks} settings={settings}
+              onSelectTask={setSelectedTaskId} onCreateTask={createTask} onUpdateTask={updateTask}
+              labelFilter={labelFilter} setLabelFilter={setLabelFilter}
+              monthFilter={monthFilter} setMonthFilter={setMonthFilter}
+              activeTimer={activeTimer} onStartTimer={startTimer} onStopTimer={stopTimer}
+            />
+          )
         )}
         {view === 'dashboard' && <DashboardView tasks={tasks} settings={settings} onSelectTask={setSelectedTaskId} />}
         {view === 'settings' && <SettingsView settings={settings} setSettings={setSettings} tasks={tasks} setTasks={setTasks} />}
@@ -671,7 +922,7 @@ function AffirmationPopup({ text }) {
 // ============================================================================
 // TOP NAV
 // ============================================================================
-function TopNav({ view, setView, activeTimer, activeTimerTask, activeTimerSubtask, currentTimerSeconds, onStopTimer, onSelectTask, themeMode, onToggleTheme }) {
+function TopNav({ view, setView, activeTimer, activeTimerTask, activeTimerSubtask, currentTimerSeconds, onStopTimer, onSelectTask, themeMode, onToggleTheme, user, onSignOut }) {
   const activeLabel = activeTimerSubtask
     ? `${activeTimerTask?.title} → ${activeTimerSubtask.title}`
     : (activeTimerTask?.title || 'Task');
@@ -721,7 +972,52 @@ function TopNav({ view, setView, activeTimer, activeTimerTask, activeTimerSubtas
         <button className="db-btn db-btn-ghost" onClick={onToggleTheme} title="Toggle theme">
           {themeMode === 'light' ? <Moon size={14} /> : <Sun size={14} />}
         </button>
+        <ProfileMenu user={user} onSignOut={onSignOut} />
       </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// PROFILE MENU
+// ============================================================================
+function ProfileMenu({ user, onSignOut }) {
+  const [open, setOpen] = useState(false);
+  const email = user?.email || '';
+  const initial = email ? email[0].toUpperCase() : '?';
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={email}
+        style={{ width: 28, height: 28, borderRadius: '50%', border: 'none', cursor: 'pointer',
+          background: 'var(--accent)', color: 'white', fontSize: 12, fontWeight: 600,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+      >
+        {initial}
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 29 }} />
+          <div style={{ position: 'absolute', top: '120%', right: 0, zIndex: 30,
+            background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8,
+            padding: 6, minWidth: 200, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
+            <div style={{ padding: '6px 8px', fontSize: 12, color: 'var(--text-secondary)',
+              borderBottom: '1px solid var(--border)', marginBottom: 4, wordBreak: 'break-all' }}>
+              {email}
+            </div>
+            <div
+              onClick={() => { setOpen(false); onSignOut(); }}
+              style={{ padding: '6px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 13, color: 'var(--alert)' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--alert-soft)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+            >
+              Sign out
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
