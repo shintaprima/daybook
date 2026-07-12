@@ -16,5 +16,3 @@ A personal task management app — Kanban board, time tracking, and a dashboard 
 ## Tech stack
 
 React + Vite, deployed on Vercel. Data currently lives in the browser's localStorage.
-
-## Running locally
