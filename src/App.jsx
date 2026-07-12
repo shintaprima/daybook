@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Play, Square, Plus, X, Calendar, Clock, Tag, Trash2, Archive, ChevronDown, ChevronRight, ChevronLeft, Settings as SettingsIcon, LayoutGrid, BarChart3, Check, ArchiveRestore, Bell, Moon, Sun, Download, Upload } from 'lucide-react';
+import { Play, Square, Plus, X, Calendar, Clock, Tag, Trash2, Archive, ChevronDown, ChevronRight, ChevronLeft, Settings as SettingsIcon, LayoutGrid, BarChart3, Check, ArchiveRestore, Bell, Moon, Sun, Download, Upload, Flag, Maximize2, Minimize2 } from 'lucide-react';
 
 // ============================================================================
 // THEME CONFIGURATION
@@ -114,7 +114,20 @@ const DEFAULT_SETTINGS = {
   notifications: {
     browserPush: false,
     inApp: true,
+    soundOnTimerEnd: true,
   },
+};
+
+// Priority levels — order matters for cyclePriority (low → normal → high → low)
+const PRIORITY_LEVELS = ['low', 'normal', 'high'];
+const PRIORITY_CONFIG = {
+  high:   { label: 'High',   color: 'var(--alert)',      bg: 'var(--alert-soft)',     border: 'var(--alert)' },
+  normal: { label: 'Normal', color: 'var(--text-muted)', bg: 'var(--surface-alt)',    border: 'var(--border)' },
+  low:    { label: 'Low',    color: '#5B7A99',           bg: 'rgba(91,122,153,0.12)', border: 'rgba(91,122,153,0.35)' },
+};
+const cyclePriority = (current) => {
+  const idx = PRIORITY_LEVELS.indexOf(current || 'normal');
+  return PRIORITY_LEVELS[(idx + 1) % PRIORITY_LEVELS.length];
 };
 
 // Positive affirmation messages — shown when task transitions into "done"
@@ -150,6 +163,8 @@ const saveToStorage = (key, value) => {
 const migrateTasks = (tasks) => tasks.map(t => ({
   ...t,
   subtasks: (t.subtasks || []).map(s => ({ ...s, timeEntries: s.timeEntries || [] })),
+  priority: t.priority || 'normal',
+  statusChangedAt: t.statusChangedAt || t.createdAt || new Date().toISOString(),
 }));
 
 // ============================================================================
@@ -192,6 +207,28 @@ const formatDate = (iso) => {
 const formatDateTime = (iso) => {
   if (!iso) return '';
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+};
+const playBellSound = () => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    const fundamental = 523.25; // C5 — soft, mid-pitched, not a harsh clang
+    const partials = [1, 2.4, 3.8]; // slightly inharmonic overtones = bell-ish timbre
+    const peakGains = [0.28, 0.1, 0.05];
+    partials.forEach((mult, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = fundamental * mult;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(peakGains[i], now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.4);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 1.5);
+    });
+  } catch { /* Web Audio unavailable — fail silently */ }
 };
 const isOverdue = (task) => {
   if (!task.endDate || task.statusId === 'done' || task.archived) return false;
@@ -306,6 +343,12 @@ export default function App() {
     return () => clearInterval(i);
   }, [activeTimer]);
 
+  const bellPlayedRef = useRef(false);
+
+  useEffect(() => {
+    bellPlayedRef.current = false;
+  }, [activeTimer?.startedAt]);
+
   const theme = THEME[settings.themeMode];
   const headingFont = FONT_OPTIONS.find(f => f.id === settings.headingFont)?.stack || FONT_OPTIONS[0].stack;
   const selectedTask = tasks.find(t => t.id === selectedTaskId);
@@ -333,6 +376,14 @@ export default function App() {
     return activeTimer.mode === 'countdown' ? Math.max(0, activeTimer.duration - elapsed) : elapsed;
   }, [activeTimer, tick]);
 
+  useEffect(() => {
+    if (activeTimer?.mode === 'countdown' && currentTimerSeconds === 0
+        && !bellPlayedRef.current && settings.notifications.soundOnTimerEnd) {
+      bellPlayedRef.current = true;
+      playBellSound();
+    }
+  }, [currentTimerSeconds, activeTimer, settings.notifications.soundOnTimerEnd]);
+
   const activeTimerTask = activeTimer ? tasks.find(t => t.id === activeTimer.taskId) : null;
   const activeTimerSubtask = (activeTimer && activeTimer.subtaskId && activeTimerTask)
     ? activeTimerTask.subtasks.find(s => s.id === activeTimer.subtaskId) : null;
@@ -344,6 +395,7 @@ export default function App() {
       id: uid(), title: 'New Task', description: '', statusId, labels: [],
       startDate: null, endDate: null, subtasks: [], timeEntries: [], comments: [],
       createdAt: new Date().toISOString(), archived: false,
+      priority: 'normal', statusChangedAt: new Date().toISOString(),
     };
     setTasks(prev => [newTask, ...prev]);
     setSelectedTaskId(newTask.id);
@@ -353,6 +405,9 @@ export default function App() {
     setTasks(prev => prev.map(t => {
       if (t.id !== id) return t;
       const next = { ...t, ...patch };
+      if (patch.statusId && patch.statusId !== t.statusId) {
+        next.statusChangedAt = new Date().toISOString();
+      }
       // Affirmation trigger: status transition to done
       if (patch.statusId === 'done' && t.statusId !== 'done') {
         const now = Date.now();
@@ -549,6 +604,7 @@ export default function App() {
         view={view} setView={setView}
         activeTimer={activeTimer} activeTimerTask={activeTimerTask} activeTimerSubtask={activeTimerSubtask}
         currentTimerSeconds={currentTimerSeconds} onStopTimer={stopTimer}
+        onSelectTask={setSelectedTaskId}
         themeMode={settings.themeMode}
         onToggleTheme={() => setSettings({ ...settings, themeMode: settings.themeMode === 'light' ? 'dark' : 'light' })}
       />
@@ -615,7 +671,7 @@ function AffirmationPopup({ text }) {
 // ============================================================================
 // TOP NAV
 // ============================================================================
-function TopNav({ view, setView, activeTimer, activeTimerTask, activeTimerSubtask, currentTimerSeconds, onStopTimer, themeMode, onToggleTheme }) {
+function TopNav({ view, setView, activeTimer, activeTimerTask, activeTimerSubtask, currentTimerSeconds, onStopTimer, onSelectTask, themeMode, onToggleTheme }) {
   const activeLabel = activeTimerSubtask
     ? `${activeTimerTask?.title} → ${activeTimerSubtask.title}`
     : (activeTimerTask?.title || 'Task');
@@ -645,16 +701,18 @@ function TopNav({ view, setView, activeTimer, activeTimerTask, activeTimerSubtas
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         {activeTimer && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10,
+          <div onClick={() => onSelectTask(activeTimer.taskId)}
+            title="Open task"
+            style={{ display: 'flex', alignItems: 'center', gap: 10,
             background: 'var(--accent-soft)', color: 'var(--accent)',
-            padding: '6px 12px', borderRadius: 20, fontSize: 13 }}>
+            padding: '6px 12px', borderRadius: 20, fontSize: 13, cursor: 'pointer' }}>
             <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--accent)',
               animation: 'pulse-dot 1.5s infinite' }} />
             <span className="db-mono" style={{ fontWeight: 500 }}>{formatDurationLong(currentTimerSeconds)}</span>
             <span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {activeLabel}
             </span>
-            <button onClick={onStopTimer} className="db-btn-ghost"
+            <button onClick={(e) => { e.stopPropagation(); onStopTimer(); }} className="db-btn-ghost"
               style={{ padding: 2, color: 'var(--accent)', border: 'none', background: 'transparent', cursor: 'pointer' }}>
               <Square size={12} fill="currentColor" />
             </button>
@@ -762,11 +820,76 @@ function StatusSelect({ value, statuses, onChange, style = {}, size = 'normal', 
   );
 }
 
+function PrioritySelect({ value, onChange, size = 'normal' }) {
+  const priority = value || 'normal';
+  const cfg = PRIORITY_CONFIG[priority];
+  const fontSize = size === 'small' ? 11 : 13;
+  const paddingY = size === 'small' ? 2 : 7;
+  const paddingLeft = size === 'small' ? 8 : 12;
+  const paddingRight = size === 'small' ? 22 : 28;
+  const chevronSize = size === 'small' ? 10 : 12;
+  const chevronRight = size === 'small' ? 6 : 10;
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <select
+        value={priority}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          fontFamily: 'inherit',
+          fontSize,
+          fontWeight: 500,
+          padding: `${paddingY}px ${paddingRight}px ${paddingY}px ${paddingLeft}px`,
+          borderRadius: 6,
+          border: `1px solid ${cfg.border}`,
+          background: cfg.bg,
+          color: cfg.color,
+          cursor: 'pointer',
+          outline: 'none',
+          appearance: 'none',
+          WebkitAppearance: 'none',
+          MozAppearance: 'none',
+          minWidth: size === 'small' ? 80 : 110,
+        }}
+      >
+        {PRIORITY_LEVELS.map(p => (
+          <option key={p} value={p} style={{ background: 'var(--surface)', color: 'var(--text-primary)' }}>
+            {PRIORITY_CONFIG[p].label}
+          </option>
+        ))}
+      </select>
+      <ChevronDown
+        size={chevronSize}
+        style={{
+          position: 'absolute',
+          right: chevronRight,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          color: cfg.color,
+          pointerEvents: 'none',
+        }}
+      />
+    </div>
+  );
+}
+
 // ============================================================================
 // BOARD VIEW
 // ============================================================================
 function BoardView({ tasks, allTasks, settings, onSelectTask, onCreateTask, onUpdateTask, labelFilter, setLabelFilter, monthFilter, setMonthFilter, activeTimer, onStartTimer, onStopTimer }) {
   const [showLabelMenu, setShowLabelMenu] = useState(false);
+  const [sortModeByStatus, setSortModeByStatus] = useState({});
+
+  const sortTasks = (list, mode) => {
+    const order = { high: 0, normal: 1, low: 2 };
+    return [...list].sort((a, b) => {
+      if (mode === 'priority') {
+        const diff = (order[a.priority] ?? 1) - (order[b.priority] ?? 1);
+        if (diff !== 0) return diff;
+      }
+      return new Date(b.statusChangedAt || b.createdAt) - new Date(a.statusChangedAt || a.createdAt);
+    });
+  };
 
   const monthOptions = useMemo(() => {
     const set = new Set();
@@ -841,28 +964,47 @@ function BoardView({ tasks, allTasks, settings, onSelectTask, onCreateTask, onUp
 
       <div style={{ display: 'grid', gridTemplateColumns: `repeat(${settings.statuses.length}, 1fr)`, gap: 14 }}>
         {settings.statuses.map(status => {
-          const colTasks = tasks.filter(t => t.statusId === status.id);
+          const sortMode = sortModeByStatus[status.id] || 'recent';
+          const colTasks = sortTasks(tasks.filter(t => t.statusId === status.id), sortMode);
           const statusColor = getStatusColor(status.color, settings.themeMode);
           return (
-            <div key={status.id} style={{ minHeight: 200 }}>
+            <div key={status.id} style={{ minHeight: 200, display: 'flex', flexDirection: 'column' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10,
-                paddingBottom: 8, borderBottom: `2px solid ${statusColor}` }}>
+                paddingBottom: 8, borderBottom: `2px solid ${statusColor}`, flexShrink: 0 }}>
                 <div style={{ width: 8, height: 8, borderRadius: '50%', background: statusColor }} />
                 <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.02em', textTransform: 'uppercase' }}>
                   {status.name}
                 </span>
-                <span className="db-mono" style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                <span className="db-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                   {colTasks.length}
                 </span>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 2 }}>
+                  <button title="Sort by most recent"
+                    onClick={() => setSortModeByStatus(prev => ({ ...prev, [status.id]: 'recent' }))}
+                    style={{ padding: 4, borderRadius: 4, border: 'none', cursor: 'pointer', display: 'flex',
+                      background: sortMode === 'recent' ? 'var(--surface-alt)' : 'transparent',
+                      color: sortMode === 'recent' ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                    <Clock size={12} />
+                  </button>
+                  <button title="Sort by priority"
+                    onClick={() => setSortModeByStatus(prev => ({ ...prev, [status.id]: 'priority' }))}
+                    style={{ padding: 4, borderRadius: 4, border: 'none', cursor: 'pointer', display: 'flex',
+                      background: sortMode === 'priority' ? 'var(--surface-alt)' : 'transparent',
+                      color: sortMode === 'priority' ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                    <Flag size={12} />
+                  </button>
+                </div>
               </div>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div className="db-scrollbar" style={{ display: 'flex', flexDirection: 'column', gap: 8,
+                overflowY: 'auto', maxHeight: 'calc(100vh - 240px)', paddingRight: 4 }}>
                 {colTasks.map(task => (
                   <TaskCard key={task.id} task={task} settings={settings} statusColor={statusColor}
                     onClick={() => onSelectTask(task.id)}
                     activeTimer={activeTimer}
                     onStartTimer={() => onStartTimer(task.id, null, 'stopwatch')}
-                    onStopTimer={onStopTimer} />
+                    onStopTimer={onStopTimer}
+                    onCyclePriority={() => onUpdateTask(task.id, { priority: cyclePriority(task.priority) })} />
                 ))}
                 <button className="db-btn db-btn-ghost" style={{ justifyContent: 'flex-start', color: 'var(--text-muted)' }}
                   onClick={() => onCreateTask(status.id)}>
@@ -880,7 +1022,7 @@ function BoardView({ tasks, allTasks, settings, onSelectTask, onCreateTask, onUp
 // ============================================================================
 // TASK CARD
 // ============================================================================
-function TaskCard({ task, settings, statusColor, onClick, activeTimer, onStartTimer, onStopTimer }) {
+function TaskCard({ task, settings, statusColor, onClick, activeTimer, onStartTimer, onStopTimer, onCyclePriority }) {
   const totalSeconds = getTotalSeconds(task);
   const subtaskProgress = task.subtasks.length > 0
     ? Math.round((task.subtasks.filter(s => s.statusId === 'done').length / task.subtasks.length) * 100) : null;
@@ -888,6 +1030,8 @@ function TaskCard({ task, settings, statusColor, onClick, activeTimer, onStartTi
   const isTimerActive = activeTimer?.taskId === task.id && !activeTimer?.subtaskId;
   const anyActiveOnThis = activeTimer?.taskId === task.id;
   const taskLabels = task.labels.map(lid => settings.labels.find(l => l.id === lid)).filter(Boolean);
+  const priority = task.priority || 'normal';
+  const priorityCfg = PRIORITY_CONFIG[priority];
 
   return (
     <div className="db-card db-kbd-card" onClick={onClick} style={{ borderLeft: `3px solid ${statusColor}` }}>
@@ -933,19 +1077,30 @@ function TaskCard({ task, settings, statusColor, onClick, activeTimer, onStartTi
           </div>
         </div>
 
-        <button onClick={(e) => {
-          e.stopPropagation();
-          if (isTimerActive) onStopTimer();
-          else if (!anyActiveOnThis) onStartTimer();
-        }} style={{
-          padding: 4, borderRadius: 4,
-          color: isTimerActive ? 'var(--alert)' : 'var(--accent)',
-          cursor: anyActiveOnThis && !isTimerActive ? 'not-allowed' : 'pointer',
-          opacity: anyActiveOnThis && !isTimerActive ? 0.4 : 1,
-          display: 'flex', alignItems: 'center', border: 'none', background: 'transparent',
-        }} title={isTimerActive ? 'Stop timer' : (anyActiveOnThis ? 'Timer running on subtask' : 'Start timer')}>
-          {isTimerActive ? <Square size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+          <button onClick={(e) => { e.stopPropagation(); onCyclePriority?.(); }}
+            title={`Priority: ${priorityCfg.label} (click to change)`}
+            style={{
+              padding: 4, borderRadius: 4, border: 'none', background: 'transparent', cursor: 'pointer',
+              color: priorityCfg.color, opacity: priority === 'normal' ? 0.4 : 1,
+              display: 'flex', alignItems: 'center',
+            }}>
+            <Flag size={13} fill={priority === 'high' ? 'currentColor' : 'none'} />
+          </button>
+          <button onClick={(e) => {
+            e.stopPropagation();
+            if (isTimerActive) onStopTimer();
+            else if (!anyActiveOnThis) onStartTimer();
+          }} style={{
+            padding: 4, borderRadius: 4,
+            color: isTimerActive ? 'var(--alert)' : 'var(--accent)',
+            cursor: anyActiveOnThis && !isTimerActive ? 'not-allowed' : 'pointer',
+            opacity: anyActiveOnThis && !isTimerActive ? 0.4 : 1,
+            display: 'flex', alignItems: 'center', border: 'none', background: 'transparent',
+          }} title={isTimerActive ? 'Stop timer' : (anyActiveOnThis ? 'Timer running on subtask' : 'Start timer')}>
+            {isTimerActive ? <Square size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -957,25 +1112,13 @@ function TaskCard({ task, settings, statusColor, onClick, activeTimer, onStartTi
 function TaskDetailPanel({ task, settings, onClose, onUpdate, onDelete, onArchive, activeTimer, onStartTimer, onStopTimer, onLogTime, onDeleteEntry, currentTimerSeconds }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showLogTimeModal, setShowLogTimeModal] = useState(null); // null | { subtaskId }
+  const [isMaximized, setIsMaximized] = useState(false);
   const isTimerActiveOnTask = activeTimer?.taskId === task.id && !activeTimer?.subtaskId;
   const totalSeconds = getTotalSeconds(task);
   const ownSeconds = task.timeEntries.reduce((s, e) => s + e.seconds, 0);
 
-  return (
-    <div style={{ position: 'fixed', top: 0, right: 0, width: 520, maxWidth: '100vw',
-      height: '100vh', zIndex: 30, boxShadow: '-10px 0 40px rgba(0,0,0,0.08)' }}
-      className="db-panel db-scrollbar">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
-        <StatusSelect value={task.statusId} statuses={settings.statuses}
-          themeMode={settings.themeMode}
-          onChange={(v) => onUpdate({ statusId: v })} />
-        <div style={{ display: 'flex', gap: 4 }}>
-          <button className="db-btn db-btn-ghost" onClick={onArchive} title="Archive"><Archive size={14} /></button>
-          <button className="db-btn db-btn-ghost db-btn-danger" onClick={() => setConfirmDelete(true)} title="Delete"><Trash2 size={14} /></button>
-          <button className="db-btn db-btn-ghost" onClick={onClose} title="Close"><X size={14} /></button>
-        </div>
-      </div>
-
+  const detailsBlock = (
+    <>
       <textarea value={task.title} onChange={e => onUpdate({ title: e.target.value })}
         className="db-input db-heading"
         style={{ fontSize: 21, fontWeight: 500, padding: 8, border: '1px solid transparent',
@@ -1027,60 +1170,110 @@ function TaskDetailPanel({ task, settings, onClose, onUpdate, onDelete, onArchiv
           </div>
         )}
       </div>
+    </>
+  );
 
-      {/* Time tracking for the parent task */}
-      <div style={{ marginTop: 20, padding: 14, background: 'var(--surface-alt)', borderRadius: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            Time Tracking <span style={{ textTransform: 'none', color: 'var(--text-muted)' }}>· task + all subtasks</span>
-          </div>
-          <div className="db-mono" style={{ fontSize: 16, fontWeight: 500 }}>
-            {formatDurationLong(totalSeconds + (activeTimer?.taskId === task.id ? currentTimerSeconds : 0))}
-          </div>
+  const timeTrackingBlock = (
+    <div style={{ marginTop: 20, padding: 14, background: 'var(--surface-alt)', borderRadius: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Time Tracking <span style={{ textTransform: 'none', color: 'var(--text-muted)' }}>· task + all subtasks</span>
         </div>
-
-        {isTimerActiveOnTask ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div className="db-mono" style={{ fontSize: 22, fontWeight: 500, color: 'var(--accent)' }}>
-              {formatDurationLong(currentTimerSeconds)}
-            </div>
-            <button className="db-btn db-btn-danger" onClick={onStopTimer} style={{ marginLeft: 'auto' }}>
-              <Square size={12} fill="currentColor" /> Stop
-            </button>
-          </div>
-        ) : (
-          <>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-              {[15, 30, 45, 60].map(min => (
-                <button key={min} className="db-btn"
-                  disabled={!!activeTimer}
-                  onClick={() => onStartTimer(task.id, null, 'countdown', min * 60)}>{min}m</button>
-              ))}
-              <button className="db-btn db-btn-primary"
-                disabled={!!activeTimer}
-                onClick={() => onStartTimer(task.id, null, 'stopwatch')}>
-                <Play size={12} fill="currentColor" /> Stopwatch
-              </button>
-              <button className="db-btn" onClick={() => setShowLogTimeModal({ subtaskId: null })}>
-                <Plus size={12} /> Log time
-              </button>
-            </div>
-            <CustomTimerInput disabled={!!activeTimer}
-              onStart={(seconds) => onStartTimer(task.id, null, 'countdown', seconds)} />
-          </>
-        )}
-
-        {/* Recent sessions across task + all subtasks */}
-        <RecentSessions task={task} onDelete={onDeleteEntry} />
+        <div className="db-mono" style={{ fontSize: 16, fontWeight: 500 }}>
+          {formatDurationLong(totalSeconds + (activeTimer?.taskId === task.id ? currentTimerSeconds : 0))}
+        </div>
       </div>
 
-      {/* Subtasks */}
-      <Subtasks task={task} settings={settings} onUpdate={onUpdate}
-        activeTimer={activeTimer} onStartTimer={onStartTimer} onStopTimer={onStopTimer}
-        onOpenLogTime={(sid) => setShowLogTimeModal({ subtaskId: sid })} />
+      {isTimerActiveOnTask ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div className="db-mono" style={{ fontSize: 22, fontWeight: 500, color: 'var(--accent)' }}>
+            {formatDurationLong(currentTimerSeconds)}
+          </div>
+          <button className="db-btn db-btn-danger" onClick={onStopTimer} style={{ marginLeft: 'auto' }}>
+            <Square size={12} fill="currentColor" /> Stop
+          </button>
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {[15, 30, 45, 60].map(min => (
+              <button key={min} className="db-btn"
+                disabled={!!activeTimer}
+                onClick={() => onStartTimer(task.id, null, 'countdown', min * 60)}>{min}m</button>
+            ))}
+            <button className="db-btn db-btn-primary"
+              disabled={!!activeTimer}
+              onClick={() => onStartTimer(task.id, null, 'stopwatch')}>
+              <Play size={12} fill="currentColor" /> Stopwatch
+            </button>
+            <button className="db-btn" onClick={() => setShowLogTimeModal({ subtaskId: null })}>
+              <Plus size={12} /> Log time
+            </button>
+          </div>
+          <CustomTimerInput disabled={!!activeTimer}
+            onStart={(seconds) => onStartTimer(task.id, null, 'countdown', seconds)} />
+        </>
+      )}
 
-      {/* Comments */}
-      <Comments task={task} onUpdate={onUpdate} />
+      {/* Recent sessions across task + all subtasks */}
+      <RecentSessions task={task} onDelete={onDeleteEntry} />
+    </div>
+  );
+
+  const subtasksBlock = (
+    <Subtasks task={task} settings={settings} onUpdate={onUpdate}
+      activeTimer={activeTimer} onStartTimer={onStartTimer} onStopTimer={onStopTimer}
+      onOpenLogTime={(sid) => setShowLogTimeModal({ subtaskId: sid })} />
+  );
+
+  const commentsBlock = <Comments task={task} onUpdate={onUpdate} />;
+
+  return (
+    <div style={isMaximized ? {
+        position: 'fixed', inset: 0, zIndex: 30, padding: '40px 60px',
+      } : {
+        position: 'fixed', top: 0, right: 0, width: 520, maxWidth: '100vw',
+        height: '100vh', zIndex: 30, boxShadow: '-10px 0 40px rgba(0,0,0,0.08)', padding: 24,
+      }}
+      className="db-panel db-scrollbar">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18,
+        maxWidth: isMaximized ? 1200 : 'none', margin: isMaximized ? '0 auto 18px' : 0 }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <StatusSelect value={task.statusId} statuses={settings.statuses}
+            themeMode={settings.themeMode}
+            onChange={(v) => onUpdate({ statusId: v })} />
+          <PrioritySelect value={task.priority} onChange={(v) => onUpdate({ priority: v })} />
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button className="db-btn db-btn-ghost" onClick={() => setIsMaximized(m => !m)}
+            title={isMaximized ? 'Restore to sidebar' : 'Maximize to full page'}>
+            {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+          <button className="db-btn db-btn-ghost" onClick={onArchive} title="Archive"><Archive size={14} /></button>
+          <button className="db-btn db-btn-ghost db-btn-danger" onClick={() => setConfirmDelete(true)} title="Delete"><Trash2 size={14} /></button>
+          <button className="db-btn db-btn-ghost" onClick={onClose} title="Close"><X size={14} /></button>
+        </div>
+      </div>
+
+      {isMaximized ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 32, maxWidth: 1200, margin: '0 auto' }}>
+          <div>
+            {detailsBlock}
+            {subtasksBlock}
+          </div>
+          <div>
+            {timeTrackingBlock}
+            {commentsBlock}
+          </div>
+        </div>
+      ) : (
+        <>
+          {detailsBlock}
+          {timeTrackingBlock}
+          {subtasksBlock}
+          {commentsBlock}
+        </>
+      )}
 
       {confirmDelete && (
         <div className="db-modal-backdrop" onClick={() => setConfirmDelete(false)}>
@@ -1273,7 +1466,7 @@ function Comments({ task, onUpdate }) {
         Activity log <span style={{ textTransform: 'none', color: 'var(--text-muted)' }}>· what you did, when</span>
       </div>
       {task.comments.length > 0 && (
-        <div style={{ marginBottom: 10 }}>
+        <div className="db-scrollbar" style={{ marginBottom: 10, maxHeight: 320, overflowY: 'auto', paddingRight: 4 }}>
           {[...task.comments].reverse().map(c => (
             <div key={c.id} style={{ padding: 10, background: 'var(--surface-alt)', borderRadius: 6, marginBottom: 6 }}>
               <div style={{ fontSize: 13, lineHeight: 1.5 }}>{renderMarkdown(c.text)}</div>
@@ -1359,6 +1552,7 @@ function DashboardView({ tasks, settings, onSelectTask }) {
   const [customEnd, setCustomEnd] = useState('');
   const [labelFilter, setLabelFilter] = useState([]);
   const [chartGroup, setChartGroup] = useState('label');
+  const [trendMetric, setTrendMetric] = useState('hours');
 
   const { startDate, endDate } = useMemo(() => {
     const now = new Date();
@@ -1439,8 +1633,8 @@ function DashboardView({ tasks, settings, onSelectTask }) {
   const barData = useMemo(() => {
     if (chartGroup === 'label') {
       const totals = {};
-      settings.labels.forEach(l => { totals[l.id] = { name: l.name, color: l.color, seconds: 0 }; });
-      totals['_unlabeled'] = { name: 'no label', color: '#9AA3AD', seconds: 0 };
+      settings.labels.forEach(l => { totals[l.id] = { name: l.name, color: 'var(--accent)', seconds: 0 }; });
+      totals['_unlabeled'] = { name: 'no label', color: 'var(--accent)', seconds: 0 };
       filteredTasks.forEach(t => {
         const taskSeconds = getAllEntries(t)
           .filter(e => { const d = new Date(e.startedAt); return d >= startDate && d <= endDate; })
@@ -1450,12 +1644,12 @@ function DashboardView({ tasks, settings, onSelectTask }) {
       });
       return Object.values(totals).filter(t => t.seconds > 0).sort((a, b) => b.seconds - a.seconds);
     } else {
-      return filteredTasks.map((t, i) => {
+      return filteredTasks.map((t) => {
         const s = getAllEntries(t)
           .filter(e => { const d = new Date(e.startedAt); return d >= startDate && d <= endDate; })
           .reduce((sum, e) => sum + e.seconds, 0);
-        return { name: t.title, color: THEME.chart[i % THEME.chart.length], seconds: s };
-      }).filter(t => t.seconds > 0).sort((a, b) => b.seconds - a.seconds).slice(0, 10);
+        return { name: t.title, color: 'var(--accent)', seconds: s };
+      }).filter(t => t.seconds > 0).sort((a, b) => b.seconds - a.seconds);
     }
   }, [filteredTasks, startDate, endDate, chartGroup, settings.labels]);
 
@@ -1471,7 +1665,8 @@ function DashboardView({ tasks, settings, onSelectTask }) {
       .sort((a, b) => b.pct - a.pct);
   }, [filteredTasks]);
 
-  const maxTrend = Math.max(...trendData.map(d => Math.max(d.hours, d.tasks)), 1);
+  const maxHours = Math.max(...trendData.map(d => d.hours), 1);
+  const maxTasks = Math.max(...trendData.map(d => d.tasks), 1);
   const maxBar = Math.max(...barData.map(d => d.seconds), 1);
 
   return (
@@ -1510,14 +1705,14 @@ function DashboardView({ tasks, settings, onSelectTask }) {
       <div className="db-card" style={{ padding: 20, marginBottom: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
           <div className="db-heading" style={{ fontSize: 16, fontWeight: 500 }}>Activity over time</div>
-          <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
-            <span><span style={{ display: 'inline-block', width: 10, height: 2, background: 'var(--accent)', marginRight: 4, verticalAlign: 'middle' }} />hours</span>
-            <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#C9A961', marginRight: 4, verticalAlign: 'middle', borderRadius: 1 }} />tasks done</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button className={`db-btn ${trendMetric === 'hours' ? 'db-btn-primary' : ''}`} onClick={() => setTrendMetric('hours')} style={{ padding: '5px 10px', fontSize: 12 }}>Hours spent</button>
+            <button className={`db-btn ${trendMetric === 'tasks' ? 'db-btn-primary' : ''}`} onClick={() => setTrendMetric('tasks')} style={{ padding: '5px 10px', fontSize: 12 }}>Tasks done</button>
           </div>
         </div>
         {trendData.length === 0 ? (
           <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 13 }}>No activity in this range</div>
-        ) : <TrendChart data={trendData} maxValue={maxTrend} />}
+        ) : <TrendChart data={trendData} maxValue={trendMetric === 'hours' ? maxHours : maxTasks} metric={trendMetric} />}
       </div>
 
       {/* Two bar charts side-by-side on wide screens, stacked on narrow */}
@@ -1536,11 +1731,11 @@ function DashboardView({ tasks, settings, onSelectTask }) {
           {barData.length === 0 ? (
             <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 13 }}>No data</div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div className="db-scrollbar" style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto', paddingRight: 4 }}>
               {barData.map((d, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <div title={d.name} style={{ width: 100, fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
-                  <div style={{ flex: 1, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden', minWidth: 60 }}>
+                  <div title={d.name} style={{ flex: '3 1 0%', minWidth: 0, fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
+                  <div style={{ flex: '7 1 0%', minWidth: 60, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden' }}>
                     <div style={{ width: `${(d.seconds / maxBar) * 100}%`, height: '100%', background: d.color, transition: 'width 0.4s' }} />
                   </div>
                   <div className="db-mono" style={{ width: 60, textAlign: 'right', fontSize: 12 }}>{formatDuration(d.seconds)}</div>
@@ -1567,8 +1762,8 @@ function DashboardView({ tasks, settings, onSelectTask }) {
                 return (
                   <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <div style={{ width: 4, height: 22, background: statusColor, borderRadius: 2, flexShrink: 0 }} />
-                    <div title={d.name} style={{ width: 100, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
-                    <div style={{ flex: 1, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden', minWidth: 60 }}>
+                    <div title={d.name} style={{ flex: '3 1 0%', minWidth: 0, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
+                    <div style={{ flex: '7 1 0%', minWidth: 60, height: 22, background: 'var(--surface-alt)', borderRadius: 4, overflow: 'hidden' }}>
                       <div style={{ width: `${d.pct}%`, height: '100%', background: 'var(--accent)', transition: 'width 0.4s' }} />
                     </div>
                     <div style={{ width: 80, textAlign: 'right', fontSize: 12, color: 'var(--text-secondary)' }}>
@@ -1604,19 +1799,30 @@ function StatCard({ label, value }) {
   );
 }
 
-function TrendChart({ data, maxValue }) {
+function TrendChart({ data, maxValue, metric }) {
   const w = 700, h = 200, padX = 40, padY = 20;
   const innerW = w - padX * 2, innerH = h - padY * 2;
   if (data.length === 0) return null;
   const xStep = data.length > 1 ? innerW / (data.length - 1) : 0;
+  const valueOf = (d) => metric === 'hours' ? d.hours : d.tasks;
   const points = data.map((d, i) => ({
     x: padX + i * xStep,
-    yHours: padY + innerH - (d.hours / maxValue) * innerH,
-    yTasks: padY + innerH - (d.tasks / maxValue) * innerH,
+    y: padY + innerH - (valueOf(d) / maxValue) * innerH,
     d,
   }));
-  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.yHours}`).join(' ');
+  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
   const areaPath = linePath + ` L ${points[points.length - 1].x} ${padY + innerH} L ${points[0].x} ${padY + innerH} Z`;
+
+  const formatKey = (key) => {
+    if (key.length === 7) {
+      const [y, m] = key.split('-');
+      return new Date(Number(y), Number(m) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    }
+    return formatDate(key);
+  };
+  const tooltipFor = (d) => metric === 'hours'
+    ? `${formatKey(d.key)} · ${formatDuration(d.hours * 3600)} logged`
+    : `${formatKey(d.key)} · ${d.tasks} task${d.tasks !== 1 ? 's' : ''} done`;
 
   return (
     <svg viewBox={`0 0 ${w} ${h}`} width="100%" style={{ maxHeight: 260 }}>
@@ -1624,15 +1830,26 @@ function TrendChart({ data, maxValue }) {
         <line key={p} x1={padX} x2={w - padX} y1={padY + innerH * p} y2={padY + innerH * p}
           stroke="var(--border)" strokeDasharray="2 4" />
       ))}
-      {points.map((p, i) => {
-        const barH = (p.d.tasks / maxValue) * innerH;
-        return <rect key={i} x={p.x - 6} y={padY + innerH - barH} width={12} height={barH} fill="#C9A961" opacity={0.6} rx={2} />;
-      })}
-      <path d={areaPath} fill="var(--accent)" opacity={0.1} />
-      <path d={linePath} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-      {points.map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.yHours} r={3} fill="var(--surface)" stroke="var(--accent)" strokeWidth={1.5} />
-      ))}
+      {metric === 'tasks' ? (
+        points.map((p, i) => (
+          <rect key={i} x={p.x - 8} y={p.y} width={16} height={padY + innerH - p.y} fill="#C9A961" rx={2}>
+            <title>{tooltipFor(p.d)}</title>
+          </rect>
+        ))
+      ) : (
+        <>
+          <path d={areaPath} fill="var(--accent)" opacity={0.1} />
+          <path d={linePath} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+          {points.map((p, i) => (
+            <g key={i}>
+              <circle cx={p.x} cy={p.y} r={8} fill="transparent">
+                <title>{tooltipFor(p.d)}</title>
+              </circle>
+              <circle cx={p.x} cy={p.y} r={3} fill="var(--surface)" stroke="var(--accent)" strokeWidth={1.5} style={{ pointerEvents: 'none' }} />
+            </g>
+          ))}
+        </>
+      )}
       {points.map((p, i) => {
         if (data.length > 10 && i % Math.ceil(data.length / 8) !== 0) return null;
         return (
@@ -1898,6 +2115,30 @@ function SettingsView({ settings, setSettings, tasks, setTasks }) {
     a.href = url; a.download = `daybook-backup-${new Date().toISOString().slice(0,10)}.json`;
     a.click(); URL.revokeObjectURL(url);
   };
+  const csvEscape = (val) => {
+    const s = String(val ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const exportCsv = () => {
+    const rows = [['task', 'subtask', 'status', 'priority', 'labels', 'archived', 'started_at', 'duration_minutes', 'manual', 'note']];
+    tasks.forEach(t => {
+      const statusName = settings.statuses.find(s => s.id === t.statusId)?.name || t.statusId;
+      const labelNames = t.labels.map(lid => settings.labels.find(l => l.id === lid)?.name).filter(Boolean).join('; ');
+      getAllEntries(t).forEach(e => {
+        rows.push([
+          t.title, e.subtaskTitle || '', statusName, t.priority || 'normal', labelNames,
+          t.archived ? 'yes' : 'no', e.startedAt, Math.round((e.seconds / 60) * 10) / 10,
+          e.manual ? 'yes' : 'no', e.note || '',
+        ]);
+      });
+    });
+    const csv = rows.map(r => r.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `daybook-time-entries-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
   const importData = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1926,28 +2167,6 @@ function SettingsView({ settings, setSettings, tasks, setTasks }) {
     <div style={{ maxWidth: 720 }}>
       <div className="db-heading" style={{ fontSize: 26, fontWeight: 500, marginBottom: 22 }}>Settings</div>
 
-      <Section title="Appearance" subtitle="Heading font shown across the app">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {FONT_OPTIONS.map(f => (
-            <label key={f.id} style={{
-              display: 'flex', alignItems: 'center', gap: 12, padding: 12,
-              border: `1px solid ${settings.headingFont === f.id ? 'var(--accent)' : 'var(--border)'}`,
-              borderRadius: 8, cursor: 'pointer',
-              background: settings.headingFont === f.id ? 'var(--accent-soft)' : 'var(--surface)',
-            }}>
-              <input type="radio" checked={settings.headingFont === f.id}
-                onChange={() => setSettings({ ...settings, headingFont: f.id })} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontFamily: f.stack, fontSize: 20, fontWeight: 500 }}>
-                  {f.name} — Tasks 2026 v3
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>{f.description}</div>
-              </div>
-            </label>
-          ))}
-        </div>
-      </Section>
-
       <Section title="Overload & reminders" subtitle="Tells you when you're doing too much or letting things rot">
         <ThresholdRow label="Max active tasks per week" value={settings.thresholds.tasksPerWeek}
           onChange={v => setSettings({ ...settings, thresholds: { ...settings.thresholds, tasksPerWeek: v }})} suffix="tasks" />
@@ -1973,6 +2192,17 @@ function SettingsView({ settings, setSettings, tasks, setTasks }) {
             <button className="db-btn" onClick={() => setSettings({ ...settings, notifications: { ...settings.notifications, browserPush: false }})}>Disable</button>
           )}
         </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 0' }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 500 }}>Sound when timer ends</div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              Plays a soft bell when a countdown timer reaches 0
+            </div>
+          </div>
+          <button className="db-btn" onClick={() => setSettings({ ...settings, notifications: { ...settings.notifications, soundOnTimerEnd: !settings.notifications.soundOnTimerEnd }})}>
+            {settings.notifications.soundOnTimerEnd ? 'Disable' : 'Enable'}
+          </button>
+        </div>
       </Section>
 
       <Section title="Statuses" subtitle="Rename to fit your workflow. Colors are fixed by position.">
@@ -1993,6 +2223,7 @@ function SettingsView({ settings, setSettings, tasks, setTasks }) {
       <Section title="Data" subtitle="Backup your tasks or import from a previous export">
         <div style={{ display: 'flex', gap: 10 }}>
           <button className="db-btn" onClick={exportData}><Download size={13} /> Export JSON</button>
+          <button className="db-btn" onClick={exportCsv}><Download size={13} /> Export CSV</button>
           <label className="db-btn" style={{ cursor: 'pointer' }}>
             <Upload size={13} /> Import JSON
             <input type="file" accept=".json" onChange={importData} style={{ display: 'none' }} />
