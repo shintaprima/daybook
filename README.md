@@ -1,21 +1,18 @@
-<<<<<<< HEAD
-## React + Vite
+# Daybook
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A personal task management app — Kanban board, time tracking, and a dashboard for reviewing where your time actually goes.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Kanban board with four statuses (Backlog, To Do, On Going, Done), each column independently scrollable
+- Priority flag (Low/Normal/High) per task, with a per-column toggle to sort by priority or by most recently moved
+- Stopwatch and countdown timers per task or subtask, with a soft bell when a countdown finishes
+- Subtasks with milestone progress tracking
+- Labels for filtering and grouping
+- Dashboard with activity trends, time-spent charts, and a milestone progress view
+- Activity log per task for freeform notes on what you worked on
+- Export your data as JSON (full backup) or CSV (time entries, for spreadsheet analysis)
 
-## React Compiler
+## Tech stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
-
-## daybook
-task management tools for personal use.
->>>>>>> 559d772e913a577914f3c91e6fed570ea55b9851
+React + Vite, deployed on Vercel. Data currently lives in the browser's localStorage.
